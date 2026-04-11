@@ -8,10 +8,10 @@ import mysql.connector
 from mysql.connector import Error
 
 # DATABASE CREDENTIALS - Update these with your MySQL credentials
-DB_HOST = "localhost"        # MySQL server address (usually localhost)
-DB_USER = "root"             # MySQL username
-DB_PASSWORD = "root"         # MySQL password
-DB_NAME = "flask_auth_db"    # Database name
+DB_HOST = ""        # MySQL server address (usually localhost)
+DB_USER = ""             # MySQL username
+DB_PASSWORD = ""         # MySQL password
+DB_NAME = ""    # Database name
 
 # Function to establish database connection
 def get_db_connection():
