@@ -14,6 +14,16 @@ Whether you're a developer exploring auth systems or looking for a reference imp
 
 ---
 
+## 🚀 Engineering Highlights
+
+- Session-based authentication system
+- Modular Flask backend architecture
+- Payment gateway integration workflow
+- Admin dashboard with management controls
+- Optimized MySQL database structure
+
+---
+
 ## 🚀 Key Features
 
 ### 👤 User Authentication
