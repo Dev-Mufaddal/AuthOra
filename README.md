@@ -111,7 +111,7 @@ Veridian/
 
 ```bash
 git clone https://github.com/Dev-Mufaddal/Veridian.git
-cd AuthOra
+cd Veridian
 ```
 
 ### 2. Create a Virtual Environment
