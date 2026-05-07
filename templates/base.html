@@ -22,7 +22,7 @@
             </div>
             <ul class="nav-menu">
                 <!-- Show to all users -->
-                <li><a href="{{ url_for('products') }}" class="nav-link">Shop</a></li>
+                <li><a href="{{ url_for('products_list') }}" class="nav-link">Shop</a></li>
 
                 {% if session.get('user_id') %}
                 <!-- Show these links only if user is logged in -->

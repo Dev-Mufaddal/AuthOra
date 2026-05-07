@@ -66,12 +66,12 @@
         <div class="empty-orders">
             <div class="empty-icon">📦</div>
             <h2>No orders yet</h2>
-            <p>You haven't placed any orders. <a href="{{ url_for('products') }}">Start shopping</a></p>
+            <p>You haven't placed any orders. <a href="{{ url_for('products_list') }}">Start shopping</a></p>
         </div>
     {% endif %}
 
     <div class="orders-footer">
-        <a href="{{ url_for('products') }}" class="btn btn-primary">Continue Shopping</a>
+        <a href="{{ url_for('products_list') }}" class="btn btn-primary">Continue Shopping</a>
         <a href="{{ url_for('dashboard') }}" class="btn btn-secondary">Back to Dashboard</a>
     </div>
 </div>
