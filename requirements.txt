@@ -1,8 +1,8 @@
 # Flask framework for web application
 Flask==3.0.0
 
-# MongoDB database connector for Python
-pymongo>=4.0.0
+# MySQL database connector for Python
+mysql-connector-python==8.0.33
 
 # For hashing passwords securely
 Werkzeug==3.0.0

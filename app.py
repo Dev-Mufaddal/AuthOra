@@ -12,11 +12,11 @@ import config
 import re
 import os
 from PIL import Image
-from db import users, products, cart, orders
-from bson import ObjectId
-from datetime import datetime
 import io
-import razorpay
+try:
+    import razorpay
+except ImportError:
+    razorpay = None
 import hashlib
 import hmac
 
@@ -32,8 +32,8 @@ app.secret_key = 'your_secret_key_change_this_12345'
 # ======================================
 # Add your Razorpay API keys here
 # Get these from: https://dashboard.razorpay.com/app/keys
-RAZORPAY_KEY_ID = config.RAZORPAY_KEY_ID
-RAZORPAY_KEY_SECRET = config.RAZORPAY_KEY_SECRET
+RAZORPAY_KEY_ID = 'rzp_test_SaGwdxC2nNrJHg'  # Replace with your API key
+RAZORPAY_KEY_SECRET = 'E0wo3EELRQ6U64QVFx0eL8T6'  # Replace with your API secret
 
 # Initialize Razorpay client
 razorpay_client = None
@@ -132,8 +132,20 @@ def validate_email(email):
 def user_exists(email_or_username):
     """Check if user already exists in database"""
     try:
-        result = users.find_one({"$or": [{"email": email_or_username}, {"username": email_or_username}]})
-        return result is not None
+        connection = config.get_db_connection()
+        if connection:
+            cursor = connection.cursor(dictionary=True)
+            
+            # Check if email or username already exists
+            query = "SELECT id FROM users WHERE email = %s OR username = %s"
+            cursor.execute(query, (email_or_username, email_or_username))
+            
+            result = cursor.fetchone()
+            cursor.close()
+            config.close_db_connection(connection)
+            
+            return result is not None  # Return True if user exists
+        return False
     except Exception as e:
         print(f"Error checking user: {e}")
         return False
@@ -150,10 +162,17 @@ def admin_required(f):
         
         # Check if user is admin
         try:
-            user = users.find_one({"_id": ObjectId(session['user_id'])})
-            
-            if user and user.get('role') == 'admin':
-                return f(*args, **kwargs)
+            connection = config.get_db_connection()
+            if connection:
+                cursor = connection.cursor(dictionary=True)
+                query = "SELECT role FROM users WHERE id = %s"
+                cursor.execute(query, (session['user_id'],))
+                user = cursor.fetchone()
+                cursor.close()
+                config.close_db_connection(connection)
+                
+                if user and user['role'] == 'admin':
+                    return f(*args, **kwargs)
         except Exception as e:
             print(f"Error checking admin status: {e}")
         
@@ -163,14 +182,15 @@ def admin_required(f):
 def get_user_by_id(user_id):
     """Get user information by ID"""
     try:
-        user = users.find_one({"_id": ObjectId(user_id)})
-        if user:
-            return {
-                "id": str(user["_id"]),
-                "username": user.get("username"),
-                "email": user.get("email"),
-                "role": user.get("role", "user")
-            }
+        connection = config.get_db_connection()
+        if connection:
+            cursor = connection.cursor(dictionary=True)
+            query = "SELECT id, username, email, role FROM users WHERE id = %s"
+            cursor.execute(query, (user_id,))
+            user = cursor.fetchone()
+            cursor.close()
+            config.close_db_connection(connection)
+            return user
         return None
     except Exception as e:
         print(f"Error getting user: {e}")
@@ -228,31 +248,33 @@ def register():
             return render_template('register.html', error='Username already taken')
         
         try:
-            # Check if MongoDB is connected
-            if users is None:
-                return render_template('register.html', error='Database connection failed. Please try again later.')
-            
             # Hash the password for security
+            # generate_password_hash creates a secure hash of the password
             hashed_password = generate_password_hash(password)
             
-            # Insert new user into database
-            user_data = {
-                "username": username,
-                "email": email,
-                "password": hashed_password,
-                "role": "user",
-                "created_at": datetime.now()
-            }
-            
-            result = users.insert_one(user_data)
-            
-            # Redirect to login page with success message
-            return redirect(url_for('login', message='Registration successful! Please log in.'))
+            # Connect to database
+            connection = config.get_db_connection()
+            if connection:
+                cursor = connection.cursor()
+                
+                # Insert new user into database
+                query = "INSERT INTO users (username, email, password) VALUES (%s, %s, %s)"
+                cursor.execute(query, (username, email, hashed_password))
+                
+                # Commit changes to database
+                connection.commit()
+                
+                cursor.close()
+                config.close_db_connection(connection)
+                
+                # Redirect to login page with success message
+                return redirect(url_for('login', message='Registration successful! Please log in.'))
+            else:
+                return render_template('register.html', error='Database connection failed')
                 
         except Exception as e:
-            error_msg = str(e)
-            print(f"Error during registration: {error_msg}")
-            return render_template('register.html', error=f'An error occurred: {error_msg}')
+            print(f"Error during registration: {e}")
+            return render_template('register.html', error='An error occurred. Please try again.')
     
     # GET request - show registration form
     return render_template('register.html')
@@ -268,12 +290,20 @@ def login():
             return render_template('login.html', error='Email and password are required')
 
         try:
-            # MongoDB instead of MySQL
-            user = users.find_one({"email": email})
+            connection = config.get_db_connection()
+            if not connection:
+                return render_template('login.html', error='Database connection failed')
+            
+            cursor = connection.cursor(dictionary=True)
+            query = "SELECT * FROM users WHERE email = %s"
+            cursor.execute(query, (email,))
+            user = cursor.fetchone()
+            cursor.close()
+            config.close_db_connection(connection)
 
             if user and check_password_hash(user['password'], password):
 
-                session['user_id'] = str(user['_id'])
+                session['user_id'] = user['id']
                 session['username'] = user['username']
                 session['email'] = user['email']
                 session['role'] = user.get('role', 'user')
@@ -323,23 +353,32 @@ def logout():
 def admin_dashboard():
     """Admin dashboard with statistics"""
     try:
-        # Get statistics
-        user_count = users.count_documents({"role": "user"})
-        product_count = products.count_documents({})
-        order_count = orders.count_documents({})
-        
-        # Calculate total sales
-        completed_orders = list(orders.aggregate([
-            {"$match": {"status": "completed"}},
-            {"$group": {"_id": None, "total": {"$sum": "$total_price"}}}
-        ]))
-        total_sales = completed_orders[0]["total"] if completed_orders else 0
-        
-        return render_template('admin_dashboard.html',
-                             user_count=user_count,
-                             product_count=product_count,
-                             order_count=order_count,
-                             total_sales=total_sales)
+        connection = config.get_db_connection()
+        if connection:
+            cursor = connection.cursor(dictionary=True)
+            
+            # Get statistics
+            cursor.execute("SELECT COUNT(*) as count FROM users WHERE role = 'user'")
+            user_count = cursor.fetchone()['count']
+            
+            cursor.execute("SELECT COUNT(*) as count FROM products")
+            product_count = cursor.fetchone()['count']
+            
+            cursor.execute("SELECT COUNT(*) as count FROM orders")
+            order_count = cursor.fetchone()['count']
+            
+            cursor.execute("SELECT SUM(total_price) as total FROM orders WHERE status = 'completed'")
+            total_sales = cursor.fetchone()['total'] or 0
+            
+            cursor.close()
+            config.close_db_connection(connection)
+            
+            return render_template('admin_dashboard.html',
+                                 user_count=user_count,
+                                 product_count=product_count,
+                                 order_count=order_count,
+                                 total_sales=total_sales)
+        return redirect(url_for('dashboard'))
     except Exception as e:
         print(f"Error in admin dashboard: {e}")
         return redirect(url_for('dashboard'))
@@ -353,13 +392,17 @@ def admin_dashboard():
 def admin_products():
     """List all products for admin to manage"""
     try:
-        all_products = list(products.find().sort("created_at", -1))
-        
-        # Convert ObjectId to string for templates
-        for p in all_products:
-            p['_id'] = str(p['_id'])
-        
-        return render_template('admin_products.html', products=all_products)
+        connection = config.get_db_connection()
+        if connection:
+            cursor = connection.cursor(dictionary=True)
+            query = "SELECT * FROM products ORDER BY created_at DESC"
+            cursor.execute(query)
+            all_products = cursor.fetchall()
+            cursor.close()
+            config.close_db_connection(connection)
+            
+            return render_template('admin_products.html', products=all_products)
+        return render_template('admin_products.html', products=[])
     except Exception as e:
         print(f"Error fetching products: {e}")
         return redirect(url_for('dashboard'))
@@ -396,18 +439,18 @@ def add_product():
                 if not image_filename:
                     return render_template('admin_products_add.html', error='Failed to save image')
             
-            product_data = {
-                "name": name,
-                "description": description,
-                "price": price,
-                "stock": stock,
-                "image_url": image_filename,
-                "created_at": datetime.now()
-            }
-            
-            products.insert_one(product_data)
-            
-            return redirect(url_for('admin_products'))
+            connection = config.get_db_connection()
+            if connection:
+                cursor = connection.cursor()
+                query = "INSERT INTO products (name, description, price, stock, image_url) VALUES (%s, %s, %s, %s, %s)"
+                cursor.execute(query, (name, description, price, stock, image_filename))
+                connection.commit()
+                cursor.close()
+                config.close_db_connection(connection)
+                
+                return redirect(url_for('admin_products'))
+            else:
+                return render_template('admin_products_add.html', error='Database connection failed')
         except ValueError:
             return render_template('admin_products_add.html', error='Invalid price or stock value')
         except Exception as e:
@@ -421,7 +464,7 @@ def add_product():
 def edit_product(product_id):
     """Edit product details with optional image update"""
     try:
-        product_obj_id = ObjectId(product_id)
+        product_id = int(product_id)
     except:
         return redirect(url_for('admin_products'))
     
@@ -438,56 +481,82 @@ def edit_product(product_id):
             price = float(price)
             stock = int(stock)
             
-            # Get current product to retrieve existing image
-            current_product = products.find_one({"_id": product_obj_id})
-            image_url = current_product['image_url'] if current_product else None
-            
-            # Handle image upload if provided
-            file = request.files.get('image')
-            if file and file.filename:
-                if allowed_file(file.filename):
-                    image_url = save_product_image(file)
-                else:
-                    return render_template('admin_products_edit.html', error='Invalid file type. Allowed: png, jpg, jpeg, gif, webp', product_id=product_id)
-            
-            # Update product
-            products.update_one(
-                {"_id": product_obj_id},
-                {"$set": {
-                    "name": name,
-                    "description": description,
-                    "price": price,
-                    "stock": stock,
-                    "image_url": image_url
-                }}
-            )
-            
-            return redirect(url_for('admin_products'))
+            connection = config.get_db_connection()
+            if connection:
+                cursor = connection.cursor(dictionary=True)
+                
+                # Get current product to retrieve existing image
+                query = "SELECT image_url FROM products WHERE id = %s"
+                cursor.execute(query, (product_id,))
+                current_product = cursor.fetchone()
+                image_url = current_product['image_url'] if current_product else None
+                
+                # Handle image upload if provided
+                file = request.files.get('image')
+                if file and file.filename:
+                    if allowed_file(file.filename):
+                        image_url = save_product_image(file)
+                    else:
+                        cursor.close()
+                        config.close_db_connection(connection)
+                        return render_template('admin_products_edit.html', error='Invalid file type. Allowed: png, jpg, jpeg, gif, webp', product_id=product_id)
+                
+                # Update product
+                update_query = "UPDATE products SET name = %s, description = %s, price = %s, stock = %s, image_url = %s WHERE id = %s"
+                cursor.execute(update_query, (name, description, price, stock, image_url, product_id))
+                connection.commit()
+                cursor.close()
+                config.close_db_connection(connection)
+                
+                return redirect(url_for('admin_products'))
+            else:
+                return render_template('admin_products_edit.html', error='Database connection failed', product_id=product_id)
         except Exception as e:
             print(f"Error updating product: {e}")
             return render_template('admin_products_edit.html', error='An error occurred', product_id=product_id)
     
     # GET request - show current product details
-    product = products.find_one({"_id": product_obj_id})
-    
-    if not product:
+    try:
+        connection = config.get_db_connection()
+        if connection:
+            cursor = connection.cursor(dictionary=True)
+            query = "SELECT * FROM products WHERE id = %s"
+            cursor.execute(query, (product_id,))
+            product = cursor.fetchone()
+            cursor.close()
+            config.close_db_connection(connection)
+            
+            if not product:
+                return redirect(url_for('admin_products'))
+            
+            return render_template('admin_products_edit.html', product=product)
         return redirect(url_for('admin_products'))
-    
-    product['_id'] = str(product['_id'])
-    return render_template('admin_products_edit.html', product=product)
+    except Exception as e:
+        print(f"Error fetching product: {e}")
+        return redirect(url_for('admin_products'))
 
 @app.route('/admin/products/delete/<product_id>')
 @admin_required
 def delete_product(product_id):
     """Delete a product"""
     try:
-        product_obj_id = ObjectId(product_id)
+        product_id = int(product_id)
         
-        # Delete from cart and orders
-        cart.delete_many({"product_id": product_obj_id})
-        
-        # Delete product
-        products.delete_one({"_id": product_obj_id})
+        connection = config.get_db_connection()
+        if connection:
+            cursor = connection.cursor()
+            
+            # Delete from cart (cascade handled by foreign key, but explicit for clarity)
+            delete_cart_query = "DELETE FROM cart WHERE product_id = %s"
+            cursor.execute(delete_cart_query, (product_id,))
+            
+            # Delete product
+            delete_product_query = "DELETE FROM products WHERE id = %s"
+            cursor.execute(delete_product_query, (product_id,))
+            
+            connection.commit()
+            cursor.close()
+            config.close_db_connection(connection)
         
         return redirect(url_for('admin_products'))
     except Exception as e:
@@ -503,13 +572,17 @@ def delete_product(product_id):
 def admin_users():
     """List all users for admin to manage"""
     try:
-        all_users = list(users.find().sort("created_at", -1))
-        
-        # Convert ObjectId to string for templates
-        for u in all_users:
-            u['_id'] = str(u['_id'])
-        
-        return render_template('admin_users.html', users=all_users)
+        connection = config.get_db_connection()
+        if connection:
+            cursor = connection.cursor(dictionary=True)
+            query = "SELECT * FROM users ORDER BY created_at DESC"
+            cursor.execute(query)
+            all_users = cursor.fetchall()
+            cursor.close()
+            config.close_db_connection(connection)
+            
+            return render_template('admin_users.html', users=all_users)
+        return render_template('admin_users.html', users=[])
     except Exception as e:
         print(f"Error fetching users: {e}")
         return redirect(url_for('dashboard'))
@@ -522,14 +595,27 @@ def delete_user(user_id):
         return redirect(url_for('admin_users'))  # Can't delete yourself
     
     try:
-        user_obj_id = ObjectId(user_id)
+        user_id = int(user_id)
         
-        # Delete related data first
-        cart.delete_many({"user_id": user_obj_id})
-        orders.delete_many({"user_id": user_obj_id})
-        
-        # Then delete user
-        users.delete_one({"_id": user_obj_id})
+        connection = config.get_db_connection()
+        if connection:
+            cursor = connection.cursor()
+            
+            # Delete related data first (cart and orders)
+            # Foreign keys with CASCADE will handle order_items automatically
+            delete_cart_query = "DELETE FROM cart WHERE user_id = %s"
+            cursor.execute(delete_cart_query, (user_id,))
+            
+            delete_orders_query = "DELETE FROM orders WHERE user_id = %s"
+            cursor.execute(delete_orders_query, (user_id,))
+            
+            # Then delete user
+            delete_user_query = "DELETE FROM users WHERE id = %s"
+            cursor.execute(delete_user_query, (user_id,))
+            
+            connection.commit()
+            cursor.close()
+            config.close_db_connection(connection)
         
         return redirect(url_for('admin_users'))
     except Exception as e:
@@ -541,7 +627,7 @@ def delete_user(user_id):
 def edit_user(user_id):
     """Edit user details (change role)"""
     try:
-        user_obj_id = ObjectId(user_id)
+        user_id = int(user_id)
     except:
         return redirect(url_for('admin_users'))
     
@@ -552,39 +638,61 @@ def edit_user(user_id):
             role = 'user'
         
         try:
-            users.update_one(
-                {"_id": user_obj_id},
-                {"$set": {"role": role}}
-            )
-            
-            return redirect(url_for('admin_users'))
+            connection = config.get_db_connection()
+            if connection:
+                cursor = connection.cursor()
+                query = "UPDATE users SET role = %s WHERE id = %s"
+                cursor.execute(query, (role, user_id))
+                connection.commit()
+                cursor.close()
+                config.close_db_connection(connection)
+                
+                return redirect(url_for('admin_users'))
+            else:
+                return redirect(url_for('admin_users'))
         except Exception as e:
             print(f"Error updating user: {e}")
             return redirect(url_for('admin_users'))
     
-    user = users.find_one({"_id": user_obj_id})
-    
-    if not user:
+    # GET request - show current user details
+    try:
+        connection = config.get_db_connection()
+        if connection:
+            cursor = connection.cursor(dictionary=True)
+            query = "SELECT * FROM users WHERE id = %s"
+            cursor.execute(query, (user_id,))
+            user = cursor.fetchone()
+            cursor.close()
+            config.close_db_connection(connection)
+            
+            if not user:
+                return redirect(url_for('admin_users'))
+            
+            return render_template('admin_users_edit.html', user=user)
         return redirect(url_for('admin_users'))
-    
-    user['_id'] = str(user['_id'])
-    return render_template('admin_users_edit.html', user=user)
+    except Exception as e:
+        print(f"Error fetching user: {e}")
+        return redirect(url_for('admin_users'))
 
 # ======================================
 # PUBLIC PRODUCT ROUTES
 # ======================================
 
 @app.route('/products')
-def products_list():
+def products():
     """Display all products for users to browse"""
     try:
-        all_products = list(products.find({"stock": {"$gt": 0}}).sort("created_at", -1))
-        
-        # Convert ObjectId to string for templates
-        for p in all_products:
-            p['_id'] = str(p['_id'])
-        
-        return render_template('products.html', products=all_products)
+        connection = config.get_db_connection()
+        if connection:
+            cursor = connection.cursor(dictionary=True)
+            query = "SELECT * FROM products WHERE stock > 0 ORDER BY created_at DESC"
+            cursor.execute(query)
+            all_products = cursor.fetchall()
+            cursor.close()
+            config.close_db_connection(connection)
+            
+            return render_template('products.html', products=all_products)
+        return render_template('products.html', products=[])
     except Exception as e:
         print(f"Error fetching products: {e}")
         return render_template('products.html', products=[])
@@ -598,28 +706,30 @@ def products_list():
 def view_cart():
     """View shopping cart"""
     try:
-        user_id = ObjectId(session['user_id'])
+        user_id = session['user_id']
         
-        # Get cart items with product details
-        cart_items_data = list(cart.find({"user_id": user_id}))
-        
-        cart_items = []
-        for item in cart_items_data:
-            product = products.find_one({"_id": item["product_id"]})
-            if product:
-                cart_items.append({
-                    "id": str(item["_id"]),
-                    "product_id": str(item["product_id"]),
-                    "quantity": item["quantity"],
-                    "name": product.get("name"),
-                    "price": product.get("price"),
-                    "stock": product.get("stock")
-                })
-        
-        # Calculate totals
-        total_price = sum(item['quantity'] * item['price'] for item in cart_items)
-        
-        return render_template('cart.html', cart_items=cart_items, total_price=total_price)
+        connection = config.get_db_connection()
+        if connection:
+            cursor = connection.cursor(dictionary=True)
+            
+            # Get cart items with product details
+            query = """
+            SELECT c.id, c.product_id, c.quantity, p.name, p.price, p.stock
+            FROM cart c
+            JOIN products p ON c.product_id = p.id
+            WHERE c.user_id = %s
+            """
+            cursor.execute(query, (user_id,))
+            cart_items = cursor.fetchall()
+            
+            # Calculate totals
+            total_price = sum(item['quantity'] * item['price'] for item in cart_items) if cart_items else 0
+            
+            cursor.close()
+            config.close_db_connection(connection)
+            
+            return render_template('cart.html', cart_items=cart_items, total_price=total_price)
+        return render_template('cart.html', cart_items=[], total_price=0)
     except Exception as e:
         print(f"Error loading cart: {e}")
         return render_template('cart.html', cart_items=[], total_price=0)
@@ -638,34 +748,41 @@ def add_to_cart(product_id):
         quantity = 1
     
     try:
-        product_obj_id = ObjectId(product_id)
-        user_id = ObjectId(session['user_id'])
+        product_id = int(product_id)
+        user_id = session['user_id']
         
-        # Check if product exists and has stock
-        product = products.find_one({"_id": product_obj_id})
+        connection = config.get_db_connection()
+        if connection:
+            cursor = connection.cursor(dictionary=True)
+            
+            # Check if product exists and has stock
+            check_query = "SELECT stock FROM products WHERE id = %s"
+            cursor.execute(check_query, (product_id,))
+            product = cursor.fetchone()
+            
+            if not product or product['stock'] < quantity:
+                cursor.close()
+                config.close_db_connection(connection)
+                return redirect(url_for('products'))
+            
+            # Check if item already in cart
+            existing_query = "SELECT id, quantity FROM cart WHERE user_id = %s AND product_id = %s"
+            cursor.execute(existing_query, (user_id, product_id))
+            existing = cursor.fetchone()
+            
+            if existing:
+                # Update quantity
+                update_query = "UPDATE cart SET quantity = quantity + %s WHERE id = %s"
+                cursor.execute(update_query, (quantity, existing['id']))
+            else:
+                # Add new item
+                insert_query = "INSERT INTO cart (user_id, product_id, quantity) VALUES (%s, %s, %s)"
+                cursor.execute(insert_query, (user_id, product_id, quantity))
+            
+            connection.commit()
+            cursor.close()
+            config.close_db_connection(connection)
         
-        if not product or product['stock'] < quantity:
-            return redirect(url_for('products_list'))
-        
-        # Check if item already in cart
-        existing = cart.find_one({"user_id": user_id, "product_id": product_obj_id})
-        
-        if existing:
-            # Update quantity
-            cart.update_one(
-                {"_id": existing["_id"]},
-                {"$inc": {"quantity": quantity}}
-            )
-        else:
-            # Add new item
-            cart.insert_one({
-                "user_id": user_id,
-                "product_id": product_obj_id,
-                "quantity": quantity,
-                "created_at": datetime.now()
-            })
-        
-        # Redirect directly to shopping cart page
         return redirect(url_for('view_cart'))
     except Exception as e:
         print(f"Error adding to cart: {e}")
@@ -676,11 +793,20 @@ def add_to_cart(product_id):
 def remove_from_cart(cart_item_id):
     """Remove item from cart"""
     try:
-        cart_obj_id = ObjectId(cart_item_id)
-        user_id = ObjectId(session['user_id'])
+        cart_item_id = int(cart_item_id)
+        user_id = session['user_id']
         
-        # Delete item (verify it belongs to user for security)
-        cart.delete_one({"_id": cart_obj_id, "user_id": user_id})
+        connection = config.get_db_connection()
+        if connection:
+            cursor = connection.cursor()
+            
+            # Delete item (verify it belongs to user for security)
+            delete_query = "DELETE FROM cart WHERE id = %s AND user_id = %s"
+            cursor.execute(delete_query, (cart_item_id, user_id))
+            
+            connection.commit()
+            cursor.close()
+            config.close_db_connection(connection)
         
         return redirect(url_for('view_cart'))
     except Exception as e:
@@ -696,28 +822,33 @@ def remove_from_cart(cart_item_id):
 def checkout():
     """Checkout page - just display cart items for review"""
     try:
-        user_id = ObjectId(session['user_id'])
+        user_id = session['user_id']
         
-        # Get cart items with product details
-        cart_items_data = list(cart.find({"user_id": user_id}))
+        connection = config.get_db_connection()
+        if connection:
+            cursor = connection.cursor(dictionary=True)
+            
+            # Get cart items with product details
+            query = """
+            SELECT c.id, c.product_id, c.quantity, p.name, p.price
+            FROM cart c
+            JOIN products p ON c.product_id = p.id
+            WHERE c.user_id = %s
+            """
+            cursor.execute(query, (user_id,))
+            cart_items = cursor.fetchall()
+            
+            total_price = sum(item['quantity'] * item['price'] for item in cart_items) if cart_items else 0
+            
+            cursor.close()
+            config.close_db_connection(connection)
+            
+            if not cart_items:
+                return render_template('checkout.html', error='Your cart is empty')
+            
+            return render_template('checkout.html', cart_items=cart_items, total_price=total_price)
         
-        cart_items = []
-        for item in cart_items_data:
-            product = products.find_one({"_id": item["product_id"]})
-            if product:
-                cart_items.append({
-                    "product_id": str(item["product_id"]),
-                    "quantity": item["quantity"],
-                    "name": product.get("name"),
-                    "price": product.get("price")
-                })
-        
-        total_price = sum(item['quantity'] * item['price'] for item in cart_items)
-        
-        if not cart_items:
-            return render_template('checkout.html', error='Your cart is empty')
-        
-        return render_template('checkout.html', cart_items=cart_items, total_price=total_price)
+        return render_template('checkout.html', error='Database connection failed')
     except Exception as e:
         print(f"Error loading checkout: {e}")
         return render_template('checkout.html', error='An error occurred')
@@ -740,20 +871,34 @@ def process_payment():
     
     try:
         data = request.get_json()
-        user_id = ObjectId(session['user_id'])
+        user_id = session['user_id']
+        
+        connection = config.get_db_connection()
+        if not connection:
+            return jsonify({'error': 'Database connection failed'}), 500
+        
+        cursor = connection.cursor(dictionary=True)
         
         # Get cart items
-        cart_items_data = list(cart.find({"user_id": user_id}))
+        cart_query = """
+        SELECT c.quantity, p.price
+        FROM cart c
+        JOIN products p ON c.product_id = p.id
+        WHERE c.user_id = %s
+        """
+        cursor.execute(cart_query, (user_id,))
+        cart_items_data = cursor.fetchall()
         
         if not cart_items_data:
+            cursor.close()
+            config.close_db_connection(connection)
             return jsonify({'error': 'Cart is empty'}), 400
         
         # Calculate total
-        total_price = 0
-        for item in cart_items_data:
-            product = products.find_one({"_id": item["product_id"]})
-            if product:
-                total_price += item['quantity'] * product['price']
+        total_price = sum(item['quantity'] * item['price'] for item in cart_items_data)
+        
+        cursor.close()
+        config.close_db_connection(connection)
         
         amount_in_paise = int(total_price * 100)  # Razorpay expects amount in paise
         
@@ -804,39 +949,48 @@ def verify_payment():
         if generated_signature != razorpay_signature:
             return jsonify({"success": False})
         
-        user_id = ObjectId(session['user_id'])
+        user_id = session['user_id']
+        
+        connection = config.get_db_connection()
+        if not connection:
+            return jsonify({"success": False})
+        
+        cursor = connection.cursor(dictionary=True)
         
         # Get cart items
-        cart_items_data = list(cart.find({"user_id": user_id}))
+        cart_query = """
+        SELECT c.product_id, c.quantity, p.price, p.name
+        FROM cart c
+        JOIN products p ON c.product_id = p.id
+        WHERE c.user_id = %s
+        """
+        cursor.execute(cart_query, (user_id,))
+        cart_items_data = cursor.fetchall()
         
         # Calculate total
-        total_price = 0
-        order_items = []
+        total_price = sum(item['quantity'] * item['price'] for item in cart_items_data)
+        
+        # Create order in orders table
+        order_query = "INSERT INTO orders (user_id, total_price, status, payment_id) VALUES (%s, %s, %s, %s)"
+        cursor.execute(order_query, (user_id, total_price, 'completed', razorpay_payment_id))
+        connection.commit()
+        
+        order_id = cursor.lastrowid
+        
+        # Insert order items
         for item in cart_items_data:
-            product = products.find_one({"_id": item["product_id"]})
-            if product:
-                total_price += item['quantity'] * product['price']
-                order_items.append({
-                    "product_id": item["product_id"],
-                    "quantity": item["quantity"],
-                    "price": product['price'],
-                    "name": product.get("name")
-                })
+            item_query = "INSERT INTO order_items (order_id, product_id, quantity, price) VALUES (%s, %s, %s, %s)"
+            cursor.execute(item_query, (order_id, item['product_id'], item['quantity'], item['price']))
         
-        # Create order
-        order_data = {
-            "user_id": user_id,
-            "total_price": total_price,
-            "status": "completed",
-            "payment_id": razorpay_payment_id,
-            "items": order_items,
-            "created_at": datetime.now()
-        }
-        
-        result = orders.insert_one(order_data)
+        connection.commit()
         
         # Clear cart
-        cart.delete_many({"user_id": user_id})
+        delete_cart_query = "DELETE FROM cart WHERE user_id = %s"
+        cursor.execute(delete_cart_query, (user_id,))
+        connection.commit()
+        
+        cursor.close()
+        config.close_db_connection(connection)
         
         return jsonify({
             "success": True,
@@ -852,20 +1006,34 @@ def verify_payment():
 @login_required
 def order_history():
     try:
-        user_id = ObjectId(session['user_id'])
+        user_id = session['user_id']
         
-        # Get orders
-        user_orders = list(orders.find({"user_id": user_id}).sort("created_at", -1))
+        connection = config.get_db_connection()
+        if connection:
+            cursor = connection.cursor(dictionary=True)
+            
+            # Get orders
+            orders_query = "SELECT * FROM orders WHERE user_id = %s ORDER BY created_at DESC"
+            cursor.execute(orders_query, (user_id,))
+            user_orders = cursor.fetchall()
+            
+            # Get order items for each order
+            for order in user_orders:
+                items_query = """
+                SELECT oi.id, oi.product_id, oi.quantity, oi.price, p.name
+                FROM order_items oi
+                JOIN products p ON oi.product_id = p.id
+                WHERE oi.order_id = %s
+                """
+                cursor.execute(items_query, (order['id'],))
+                order['items'] = cursor.fetchall()
+            
+            cursor.close()
+            config.close_db_connection(connection)
+            
+            return render_template("order_history.html", orders=user_orders)
         
-        # Format for template
-        for order in user_orders:
-            order['_id'] = str(order['_id'])
-            order['user_id'] = str(order['user_id'])
-            for item in order.get('items', []):
-                item['product_id'] = str(item.get('product_id', ''))
-        
-        return render_template("order_history.html", orders=user_orders)
-        
+        return render_template("order_history.html", orders=[])
     except Exception as e:
         print(f"Error loading orders: {e}")
         return render_template("order_history.html", orders=[])
