@@ -228,6 +228,10 @@ def register():
             return render_template('register.html', error='Username already taken')
         
         try:
+            # Check if MongoDB is connected
+            if users is None:
+                return render_template('register.html', error='Database connection failed. Please try again later.')
+            
             # Hash the password for security
             hashed_password = generate_password_hash(password)
             
@@ -246,8 +250,9 @@ def register():
             return redirect(url_for('login', message='Registration successful! Please log in.'))
                 
         except Exception as e:
-            print(f"Error during registration: {e}")
-            return render_template('register.html', error='An error occurred. Please try again.')
+            error_msg = str(e)
+            print(f"Error during registration: {error_msg}")
+            return render_template('register.html', error=f'An error occurred: {error_msg}')
     
     # GET request - show registration form
     return render_template('register.html')
